@@ -9,7 +9,7 @@ param (
     [switch]$SecondHalfOfMonth,    
     [Parameter(Mandatory=$false, ParameterSetName='ManualDates')]
     [Parameter(Mandatory=$true, ParameterSetName='SecondHalfOfMonth')]
-    [switch]$EmailAddressList,
+    [array]$EmailAddressList,
     [Parameter(Mandatory=$true, ParameterSetName='ManualDates')]
     [switch]$ManualDates
 )
@@ -56,10 +56,10 @@ $scriptPath = split-path -parent $MyInvocation.MyCommand.Definition
 cd $scriptPath
 
 if ($FirstHalfOfMonth) {
-    .\TeamsReportingSolution-Workflow.ps1 @FirstHalfScriptParams -FirstHalfOfMonth #-DebugMode
+    .\TeamsReportingSolution.ps1 @FirstHalfScriptParams -FirstHalfOfMonth #-DebugMode
 }
 elseif ($SecondHalfOfMonth) {
-    .\TeamsReportingSolution-Workflow.ps1 @SecondHalfScriptParams -SecondHalfOfMonth #-DebugMode
+    .\TeamsReportingSolution.ps1 @SecondHalfScriptParams -SecondHalfOfMonth #-DebugMode
 } 
 else {
     .\TeamsReportingSolution.ps1 @ManualDatesScriptParams #-DebugMode
