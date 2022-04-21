@@ -66,6 +66,6 @@ else {
 }
 
 <#
-    .\TeamsReportingSolution-Workflow.ps1 @FirstHalfScriptParams 
-    .\TeamsReportingSolution-Workflow.ps1 @SecondHalfScriptParams
+    .\TaskScheduler-TeamsReportingSolution.ps1 -FirstHalfOfMonth -ReportFolder "c:\temp\teamspbi" -UpnFilter "Jake"
+    .\TaskScheduler-TeamsReportingSolution.ps1 -SecondHalfOfMonth -ReportFolder "c:\temp\teamspbi" -UpnFilter "Jake" -EmailAddressList "jakegwynn@microsoft.com"
 #>
