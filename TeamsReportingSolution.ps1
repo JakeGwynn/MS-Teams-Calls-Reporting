@@ -152,7 +152,6 @@ function Set-QueryDates {
   If($FirstHalfOfMonth) {
     If (-not $MonthNumber) {$script:MonthNumber = $TodaysDate.Month}
     If (-not $Year) {$script:Year = $TodaysDate.Year}
-    $script:Year = $TodaysDate.Year
     $script:StartDay = 1
     $script:EndDay = 15
   } 
@@ -177,10 +176,17 @@ function Set-QueryDates {
     $script:EndMonthNumber = $MonthNumber
     $script:EndYear = $Year
   }
-  $script:StartMonthNumberString = if($StartMonthNumber.tostring().Length -eq 1) {"0$StartMonthNumber"} else {$StartMonthNumber}
-  $script:StartDayString = if($StartDay.tostring().Length -eq 1) {"0$StartDay"} else {$StartDay}
-  $script:EndMonthNumberString = if($EndMonthNumber.tostring().Length -eq 1) {"0$EndMonthNumber"} else {$EndMonthNumber}
-  $script:EndDayString = if($EndDay.tostring().Length -eq 1) {"0$EndDay"} else {$EndDay}
+  $script:QueryStartDate = [datetime]::new($StartYear, $StartMonthNumber, $StartDay, 0, 0, 0, [DateTimeKind]::Utc)
+  $script:QueryEndDateExclusive = [datetime]::new($EndYear, $EndMonthNumber, $EndDay, 0, 0, 0, [DateTimeKind]::Utc)
+  If($FirstHalfOfMonth -or $SecondHalfOfMonth) {
+    $script:QueryEndDateExclusive = $QueryEndDateExclusive.AddDays(1)
+  }
+  If($QueryEndDateExclusive -le $QueryStartDate) {
+    throw "The report end date must be after the start date. Manual end dates are exclusive."
+  }
+  $script:GraphFromDateTime = $QueryStartDate.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+  $script:GraphToDateTime = $QueryEndDateExclusive.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+  Log "Query date range (UTC): $GraphFromDateTime inclusive to $GraphToDateTime exclusive"
 }
 
 function Set-ReportFiles {
@@ -199,11 +205,11 @@ function Set-ReportFiles {
     }
     Log "Report Folder: $ReportFolder"
     Log "FirstHalfOfMonthFile: $FirstHalfOfMonthFile"
-    [System.Collections.Generic.List[psobject]]$script:FirstHalfOfMonthRecords = Import-Csv -Path "$FirstHalfOfMonthFile"
+    [System.Collections.Generic.List[psobject]]$script:FirstHalfOfMonthRecords = Import-Csv -Path "$FirstHalfOfMonthFile" -ErrorAction Stop
     $script:ExportFileName = "$($ExportFileName)_$($UpnFilter[0])_$MonthNumber-$Year.csv"
   }
   else {
-    $script:ExportFileName = "$($ExportFileName)_$($UpnFilter[0])_$StartMonth-$StartDay-$($StartYear)_to_$EndMonth-$EndDay-$EndYear.csv"
+    $script:ExportFileName = "$($ExportFileName)_$($UpnFilter[0])_$StartMonthNumber-$StartDay-$($StartYear)_to_$EndMonthNumber-$EndDay-$EndYear.csv"
   }
 }
 
@@ -247,7 +253,8 @@ function Connect-GraphApiWithClientSecret {
   $script:ClientSecret = $null
   return $ConnectGraph.access_token
 }
-function Get-TeamsPstnCallRecords {  
+function Get-TeamsPstnCallRecords {
+  $ErrorActionPreference = 'Stop'
   [System.Collections.Generic.List[psobject]]$PSTNCallRecords = @()
   $CallType = If ($apiUrl -like "*getPstnCalls*") {"PSTN"} elseif ($apiUrl -like "*getDirectRoutingCalls*") {"Direct Routing"} 
   Log "Collecting Teams $CallType call records from Graph API"
@@ -270,12 +277,16 @@ function Get-TeamsPstnCallRecords {
     } else {
       $GetMoreRecords = $true
     }
-    foreach ($Call in $CallRecordsResponse.Value) {  
+    foreach ($Call in $CallRecordsResponse.Value) {
+      $CallStartUtc = [datetimeoffset]::Parse($Call.startDateTime, [Globalization.CultureInfo]::InvariantCulture).UtcDateTime
+      If (($CallStartUtc -lt $QueryStartDate) -or ($CallStartUtc -ge $QueryEndDateExclusive)) {
+        continue
+      }
       If (($Call.callerNumber -in $UpnFilterLineUris) -or ($Call.calleeNumber -in $UpnFilterLineUris)) {
         $PSTNCallRecord = [PSCustomObject]@{}
         $CallerTeamsUser = $TeamsUsers.Where({$_.LineURI -eq $Call.callerNumber})
         $CalleeTeamsUser = $TeamsUsers.Where({$_.LineURI -eq $Call.calleeNumber})
-        $CallDuration = [math]::Round(($Call.duration/60),0)
+        $CallDuration = [decimal]$Call.duration / [decimal]60
         $CallStartTime = try{Get-Date $Call.startDateTime} catch {}
         $CallEndTime = try{Get-Date $Call.endDateTime} Catch {}
         $PSTNCallRecord = [PSCustomObject]@{
@@ -320,11 +331,10 @@ function Set-TeamsCqdPowerBiQueries {
 "@
     $QueryFilterArray = @($FirstUpnFilter,$SecondUpnFilter)
     Foreach ($QueryFilter in $QueryFilterArray) {
-      if ($QueryFilter -match "First UPN") {$StreamDirection = "First-to-Second"} else {$StreamDirection = "Second-to-First"}
+      if ($QueryFilter -eq $FirstUpnFilter) {$StreamDirection = "First-to-Second"} else {$StreamDirection = "Second-to-First"}
       $RequestBodyArray += [PSCustomObject]@{
         UPN = $UPN
         StreamDirection = $StreamDirection
-        # Request body must have
         RequestBody = @"
 {
   "queries":
@@ -348,8 +358,8 @@ function Set-TeamsCqdPowerBiQueries {
     FILTER(
         KEEPFILTERS(VALUES('CQD'[Start Time])),
         AND(
-            'CQD'[Start Time] >= (DATE($StartYear, $StartMonthNumber, $StartDay) + TIME(0, 0, 1)),
-            'CQD'[Start Time] < DATE($EndYear, $EndMonthNumber, $EndDay)
+            'CQD'[Start Time] >= DATE($($QueryStartDate.Year), $($QueryStartDate.Month), $($QueryStartDate.Day)),
+            'CQD'[Start Time] < DATE($($QueryEndDateExclusive.Year), $($QueryEndDateExclusive.Month), $($QueryEndDateExclusive.Day))
         )
     )
 
@@ -372,28 +382,8 @@ function Set-TeamsCqdPowerBiQueries {
       \"SumTotal_Audio_Stream_Duration__Minutes_\", CALCULATE(SUM('CQD'[Total Audio Stream Duration (Minutes)]))
     )
 
-  VAR __DS0PrimaryWindowed = 
-    TOPN(
-      502,
-      __DS0Core,
-      [IsGrandTotalRowTotal],
-      0,
-      'CQD'[First UPN],
-      1,
-      'CQD'[Second UPN],
-      1,
-      'CQD'[First Is Caller],
-      1,
-      'CQD'[Start Time],
-      1,
-      'CQD'[End Time],
-      1,
-      'CQD'[Stream Direction],
-      1
-    )
-
 EVALUATE
-  __DS0PrimaryWindowed
+  __DS0Core
 
 ORDER BY
   [IsGrandTotalRowTotal] DESC,
@@ -415,6 +405,7 @@ ORDER BY
   return $RequestBodyArray
 }
 function Get-TeamsCallRecords {
+  $ErrorActionPreference = 'Stop'
   $requestUrl = "datasets/$PowerBiDatasetId/executeQueries"
   Log "Collecting Teams call records with Power BI PowerShell module"
   [System.Collections.Generic.List[psobject]]$TeamsCallRecords = @()
@@ -423,6 +414,10 @@ function Get-TeamsCallRecords {
     $i++
     $PbiHttpRequestRaw = Invoke-PowerBIRestMethod -Method POST -Url $requestUrl -Body $RequestBody.RequestBody
     $PbiHttpRequest = $PbiHttpRequestRaw | ConvertFrom-Json
+    $QueryErrors = @(@($PbiHttpRequest.error; $PbiHttpRequest.results.error; $PbiHttpRequest.results.tables.error) | Where-Object { $null -ne $_ })
+    if ($QueryErrors.Count -gt 0) {
+      throw "Power BI returned an error or incomplete query result: $($QueryErrors | ConvertTo-Json -Depth 10 -Compress)"
+    }
     [System.Collections.Generic.List[psobject]]$TeamsCallRecordsTable = $PbiHttpRequest.results[0].tables[0].rows
     Log "Teams Call Records Table Count: $($TeamsCallRecordsTable.Count)"
     If($TeamsCallRecordsTable.Count -gt 1) {
@@ -485,9 +480,7 @@ function Send-ReportEmail {
     Send-MailMessage @MailParams
 }
 
-################################################### Begin Script Here ####################################################################
-
-#### Vars to Keep
+# Collect and export call records.
 Set-QueryDates
 Set-ReportFiles 
 $ClientSecretFileContents = Get-Content $ClientSecretFile
@@ -500,8 +493,6 @@ If($AdminUserName -and $AdminPwFile) {
   $SecureAdminPassword = ConvertTo-SecureString (Get-Content $AdminPwFile)
   $AdminCred = New-Object System.Management.Automation.PSCredential ($AdminUserName, $SecureAdminPassword)   
 }
-
-#### Vars to Keep
 
 Log "Importing MicrosoftTeams PowerShell Module"
 Import-Module MicrosoftTeams
@@ -538,15 +529,14 @@ else {
 
 $Token = Connect-GraphApiWithClientSecret
 $ClientSecret = $null
-$apiUrls = "https://graph.microsoft.com/v1.0/communications/callRecords/getDirectRoutingCalls(fromDateTime=$StartYear-$StartMonthNumberString-$StartDayString,toDateTime=$EndYear-$EndMonthNumberString-$EndDayString)",`
-"https://graph.microsoft.com/v1.0/communications/callRecords/getPstnCalls(fromDateTime=$StartYear-$StartMonthNumberString-$StartDayString,toDateTime=$EndYear-$EndMonthNumberString-$EndDayString)"
+$apiUrls = "https://graph.microsoft.com/v1.0/communications/callRecords/getDirectRoutingCalls(fromDateTime=$GraphFromDateTime,toDateTime=$GraphToDateTime)",`
+"https://graph.microsoft.com/v1.0/communications/callRecords/getPstnCalls(fromDateTime=$GraphFromDateTime,toDateTime=$GraphToDateTime)"
 
 [System.Collections.Generic.List[psobject]]$PSTNCallRecords = @()
 foreach ($apiUrl in $apiUrls) {
   [System.Collections.Generic.List[psobject]]$TempCallRecords = @()
   $TempCallRecords = Get-TeamsPstnCallRecords
   if ($TempCallRecords) {
-    #$TempCallRecords
     $PSTNCallRecords.AddRange($TempCallRecords)
   }
 }
@@ -572,10 +562,12 @@ if ($FirstHalfOfMonthRecords) {
 }
 
 Log "Sorting all records and removing duplicates"
-$AllCallRecords = $AllCallRecords | Sort-Object -Property StartDateTime -Unique
+# Compare all report fields so calls with the same start time remain distinct.
+$RecordProperties = 'StartDateTime', 'EndDateTime', 'CallType', 'CallerNumber', 'CalleeNumber', 'CallerUPN', 'CalleeUPN', 'CallerSIP', 'CalleeSIP', 'Duration(min)'
+$SortedCallRecords = @($AllCallRecords | Sort-Object -Property $RecordProperties -Unique)
 
 Log "Exporting final collection with all records to $ReportFolder\$ExportFileName"
-$AllCallRecords | export-csv $ReportFolder\$ExportFileName -NoTypeInformation
+$SortedCallRecords | export-csv $ReportFolder\$ExportFileName -NoTypeInformation
 
 if ($EmailAddressList) {
   Send-ReportEmail
